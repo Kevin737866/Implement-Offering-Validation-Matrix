@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express, { Request, Response } from "express";
+import { Server } from "http";
 import morgan from "morgan";
 import { dbHealth, closePool } from "./db/client";
 import { createCorsMiddleware } from "./middleware/cors";
@@ -181,20 +182,56 @@ apiRouter.get('/overview', (_req: Request, res: Response) => {
   });
 });
 
-const shutdown = async (signal: string) => {
-  console.log(`\n[server] ${signal} DB shutting down…`);
-  await closePool();
-  process.exit(0);
+let server: Server | undefined;
+
+/**
+ * @dev For testing only — allows injecting a real server instance into the module
+ * so the server.close() code path can be exercised without starting the full app.
+ */
+export const setServer = (s: Server | undefined): void => { server = s; };
+
+export const shutdown = async (signal: string) => {
+  // eslint-disable-next-line no-console
+  console.log(`\n[server] ${signal} signal received. Starting graceful shutdown...`);
+  
+  const forceExit = setTimeout(() => {
+    console.error("[server] Graceful shutdown timeout exceeded. Forcing exit.");
+    process.exit(1);
+  }, 10000);
+  forceExit.unref();
+
+  try {
+    if (server) {
+      await new Promise<void>((resolve, reject) => {
+        server!.close((err) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+      // eslint-disable-next-line no-console
+      console.log("[server] HTTP server closed.");
+    }
+    await closePool();
+    // eslint-disable-next-line no-console
+    console.log("[server] Graceful shutdown complete.");
+    clearTimeout(forceExit);
+    process.exit(0);
+  } catch (err) {
+    console.error("[server] Error during shutdown:", err);
+    clearTimeout(forceExit);
+    process.exit(1);
+  }
 };
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
 if (process.env.NODE_ENV !== "test") {
-  app.listen(port, () => {
+  server = app.listen(port, () => {
     // eslint-disable-next-line no-console
     console.log(`revora-backend listening on http://localhost:${port}`);
   });
 }
 
+export { server };
 export default app;
