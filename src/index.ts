@@ -1,6 +1,7 @@
 import "dotenv/config";
-import express, { Request, Response } from "express";
+import express, { NextFunction, Request, Response } from "express";
 import morgan from "morgan";
+import swaggerUi from "swagger-ui-express";
 import { dbHealth, closePool } from "./db/client";
 import { createCorsMiddleware } from "./middleware/cors";
 import {
@@ -15,13 +16,42 @@ import {
 
 const app = express();
 const port = process.env.PORT ?? 3000;
+
 /**
  * @dev The global prefix applied to all business logic routers.
  * Defaults to `/api/v1` if `process.env.API_VERSION_PREFIX` is not supplied.
- * Crucial for preventing route conflict and ensuring reliable downstream tooling (e.g. AWS API Gateway handling).
+ * Crucial for preventing route conflict and ensuring reliable downstream tooling.
  */
-const API_VERSION_PREFIX = process.env.API_VERSION_PREFIX ?? '/api/v1';
+const API_VERSION_PREFIX = process.env.API_VERSION_PREFIX ?? "/api/v1";
 const apiRouter = express.Router();
+
+/**
+ * @notice Minimal OpenAPI document for secured API docs exposure.
+ * @dev Keeps the route functional without expanding scope into full spec generation.
+ */
+const swaggerSpec = {
+  openapi: "3.0.0",
+  info: {
+    title: "Revora Backend API",
+    version: "1.0.0",
+    description: "Backend API for Revora platform services.",
+  },
+  paths: {
+    "/health": {
+      get: {
+        summary: "Health check endpoint",
+        responses: {
+          "200": {
+            description: "Service is healthy",
+          },
+          "503": {
+            description: "Service is degraded",
+          },
+        },
+      },
+    },
+  },
+};
 
 class InMemoryMilestoneRepository implements MilestoneRepository {
   constructor(private readonly milestones = new Map<string, Milestone>()) {}
@@ -56,12 +86,15 @@ class InMemoryMilestoneRepository implements MilestoneRepository {
       validated_by: input.verifierId,
       validated_at: input.validatedAt,
     };
+
     this.milestones.set(key, updated);
     return updated;
   }
 }
 
-class InMemoryVerifierAssignmentRepository implements VerifierAssignmentRepository {
+class InMemoryVerifierAssignmentRepository
+  implements VerifierAssignmentRepository
+{
   constructor(private readonly assignments = new Map<string, Set<string>>()) {}
 
   async isVerifierAssignedToVault(
@@ -72,7 +105,9 @@ class InMemoryVerifierAssignmentRepository implements VerifierAssignmentReposito
   }
 }
 
-class InMemoryMilestoneValidationEventRepository implements MilestoneValidationEventRepository {
+class InMemoryMilestoneValidationEventRepository
+  implements MilestoneValidationEventRepository
+{
   private events: MilestoneValidationEvent[] = [];
   private counter = 0;
 
@@ -83,6 +118,7 @@ class InMemoryMilestoneValidationEventRepository implements MilestoneValidationE
     createdAt: Date;
   }): Promise<MilestoneValidationEvent> {
     this.counter += 1;
+
     const event: MilestoneValidationEvent = {
       id: `validation-event-${this.counter}`,
       vault_id: input.vaultId,
@@ -90,6 +126,7 @@ class InMemoryMilestoneValidationEventRepository implements MilestoneValidationE
       verifier_id: input.verifierId,
       created_at: input.createdAt,
     };
+
     this.events.push(event);
     return event;
   }
@@ -105,7 +142,11 @@ class ConsoleDomainEventPublisher implements DomainEventPublisher {
   }
 }
 
-const requireAuth = (req: Request, res: Response, next: () => void): void => {
+const requireAuth = (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void => {
   const userId = req.header("x-user-id");
   const role = req.header("x-user-role");
 
@@ -122,6 +163,45 @@ const requireAuth = (req: Request, res: Response, next: () => void): void => {
   next();
 };
 
+/**
+ * @notice Protects API docs from unintended production exposure.
+ * @dev Security assumptions:
+ * - Docs are accessible by default outside production for developer usability.
+ * - In production, docs are disabled unless explicitly enabled.
+ * - If an access key is configured, clients must provide it using `x-api-docs-key`.
+ * - Returning 404 when disabled reduces route discoverability.
+ */
+const protectApiDocs = (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void => {
+  const isProduction = process.env.NODE_ENV === "production";
+  const docsEnabled = process.env.ENABLE_API_DOCS === "true";
+  const docsKey = process.env.API_DOCS_ACCESS_KEY;
+
+  if (!isProduction) {
+    next();
+    return;
+  }
+
+  if (!docsEnabled) {
+    res.status(404).json({ message: "Not found" });
+    return;
+  }
+
+  if (docsKey) {
+    const providedKey = req.header("x-api-docs-key");
+
+    if (!providedKey || providedKey !== docsKey) {
+      res.status(403).json({ message: "Forbidden" });
+      return;
+    }
+  }
+
+  next();
+};
+
 const milestoneRepository = new InMemoryMilestoneRepository(
   new Map<string, Milestone>([
     [
@@ -134,16 +214,32 @@ const milestoneRepository = new InMemoryMilestoneRepository(
     ],
   ]),
 );
+
 const verifierAssignmentRepository = new InMemoryVerifierAssignmentRepository(
   new Map<string, Set<string>>([["vault-1", new Set(["verifier-1"])]]),
 );
+
 const milestoneValidationEventRepository =
   new InMemoryMilestoneValidationEventRepository();
+
 const domainEventPublisher = new ConsoleDomainEventPublisher();
 
 app.use(createCorsMiddleware());
 app.use(express.json());
 app.use(morgan("dev"));
+
+/**
+ * @dev API documentation is intentionally mounted outside the versioned API router.
+ * This keeps operational tooling separate from business endpoints while enforcing
+ * explicit production access controls through `protectApiDocs`.
+ */
+app.use(
+  "/api-docs",
+  protectApiDocs,
+  swaggerUi.serve,
+  swaggerUi.setup(swaggerSpec),
+);
+
 /**
  * @dev All API business routes are deliberately scoped under the target version prefix.
  * This establishes an enforced boundary constraint preventing un-versioned fallback leaks.
@@ -166,6 +262,7 @@ apiRouter.use(
  */
 app.get("/health", async (_req: Request, res: Response) => {
   const db = await dbHealth();
+
   res.status(db.healthy ? 200 : 503).json({
     status: db.healthy ? "ok" : "degraded",
     service: "revora-backend",
@@ -173,7 +270,7 @@ app.get("/health", async (_req: Request, res: Response) => {
   });
 });
 
-apiRouter.get('/overview', (_req: Request, res: Response) => {
+apiRouter.get("/overview", (_req: Request, res: Response) => {
   res.json({
     name: "Stellar RevenueShare (Revora) Backend",
     description:
@@ -182,13 +279,19 @@ apiRouter.get('/overview', (_req: Request, res: Response) => {
 });
 
 const shutdown = async (signal: string) => {
+  // eslint-disable-next-line no-console
   console.log(`\n[server] ${signal} DB shutting down…`);
   await closePool();
   process.exit(0);
 };
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => {
+  void shutdown("SIGTERM");
+});
+
+process.on("SIGINT", () => {
+  void shutdown("SIGINT");
+});
 
 if (process.env.NODE_ENV !== "test") {
   app.listen(port, () => {
