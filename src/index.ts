@@ -1,6 +1,7 @@
 import "dotenv/config";
-import express, { Request, Response } from "express";
+import express, { Request, Response, NextFunction } from "express";
 import morgan from "morgan";
+import { verifyToken, JwtPayload } from "./lib/jwt";
 import { dbHealth, closePool } from "./db/client";
 import { createCorsMiddleware } from "./middleware/cors";
 import {
@@ -122,6 +123,64 @@ const requireAuth = (req: Request, res: Response, next: () => void): void => {
   next();
 };
 
+/**
+ * @notice Express middleware that enforces Bearer JWT authentication with full claim validation.
+ * @dev Extracts Bearer token from Authorization header, calls verifyToken with default
+ *      ClaimValidationOptions (30s clock tolerance), attaches validated payload to req.user.
+ *      Returns descriptive 401 JSON for each failure path; 500 only on server misconfiguration.
+ */
+function jwtClaimValidationMiddleware(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader) {
+    res.status(401).json({ error: "Unauthorized", message: "Authorization header missing" });
+    return;
+  }
+
+  const parts = authHeader.split(" ");
+  if (parts.length !== 2 || parts[0] !== "Bearer") {
+    res.status(401).json({
+      error: "Unauthorized",
+      message: "Invalid authorization scheme. Expected: Bearer <token>",
+    });
+    return;
+  }
+
+  const token = parts[1];
+
+  try {
+    const payload: JwtPayload = verifyToken(token);
+    (req as any).user = payload;
+    next();
+  } catch (err: unknown) {
+    const name = err instanceof Error ? (err as any).name : "";
+    const message = err instanceof Error ? err.message : "Invalid token";
+
+    if (name === "JsonWebTokenError") {
+      res.status(401).json({ error: "Unauthorized", message: "Invalid token signature" });
+      return;
+    }
+    if (name === "TokenExpiredError" || message === "Token has expired") {
+      res.status(401).json({ error: "Unauthorized", message: "Token has expired" });
+      return;
+    }
+    if (name === "NotBeforeError" || message.includes("not yet valid")) {
+      res.status(401).json({ error: "Unauthorized", message: "Token is not yet valid (nbf claim)" });
+      return;
+    }
+    if (message.includes("JWT_SECRET")) {
+      res.status(500).json({ error: "Server configuration error", message: "JWT secret not configured" });
+      return;
+    }
+    // All other claim violations (sub, iat, iss, aud)
+    res.status(401).json({ error: "Unauthorized", message });
+  }
+}
+
 const milestoneRepository = new InMemoryMilestoneRepository(
   new Map<string, Milestone>([
     [
@@ -179,6 +238,15 @@ apiRouter.get('/overview', (_req: Request, res: Response) => {
     description:
       "Backend API skeleton for tokenized revenue-sharing on Stellar (offerings, investments, revenue distribution).",
   });
+});
+
+/**
+ * @notice Protected endpoint demonstrating end-to-end JWT claim validation.
+ * @dev Returns the fully validated JWT payload so clients can inspect resolved claims.
+ *      Scoped under API_VERSION_PREFIX to maintain the versioned API boundary.
+ */
+apiRouter.get("/me", jwtClaimValidationMiddleware, (_req: Request, res: Response) => {
+  res.status(200).json({ user: (_req as any).user });
 });
 
 const shutdown = async (signal: string) => {
