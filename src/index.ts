@@ -104,6 +104,9 @@ const inputSanitizerMiddleware = (req: Request, res: Response, next: NextFunctio
   next();
 };
 
+// Export the middleware for testing
+export { inputSanitizerMiddleware };
+
 const app = express();
 const port = process.env.PORT ?? 3000;
 const API_VERSION_PREFIX = process.env.API_VERSION_PREFIX ?? '/api/v1';

@@ -9,7 +9,9 @@
     "migrate": "node src/db/migrate.js",
     "build": "tsc",
     "start": "node dist/index.js",
-    "lint": "eslint \"src/**/*.{ts,tsx}\""
+    "lint": "eslint \"src/**/*.{ts,tsx}\"",
+    "test": "jest --coverage",
+    "test:watch": "jest --watch"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.5.0",
@@ -17,11 +19,9 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
-    "jest": "^30.2.0",
     "morgan": "^1.10.0",
     "pg": "^8.19.0",
-    "stellar-sdk": "^13.3.0",
-    "ts-jest": "^29.4.6"
+    "stellar-sdk": "^13.3.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
@@ -31,6 +31,7 @@
     "@typescript-eslint/eslint-plugin": "^8.15.0",
     "@typescript-eslint/parser": "^8.15.0",
     "eslint": "^9.14.0",
+    "jest": "^30.2.0",
     "ts-jest": "^29.4.6",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.7.0"
