@@ -28,11 +28,87 @@ export interface ListNotificationPreferencesOptions {
 }
 
 /**
+ * User-facing notification preferences aggregated by channel type.
+ * Mirrors the API response shape for client consumption.
+ */
+export interface NotificationPreferences {
+  user_id: string;
+  email_notifications: boolean;
+  push_notifications: boolean;
+  sms_notifications: boolean;
+  updated_at: Date;
+}
+
+/**
+ * Input for upserting user-level notification preferences.
+ */
+export interface UpdateNotificationPreferencesInput {
+  email_notifications?: boolean;
+  push_notifications?: boolean;
+  sms_notifications?: boolean;
+}
+
+/**
  * Notification Preferences Repository
  * Handles database operations for user notification preferences
  */
 export class NotificationPreferencesRepository {
   constructor(private db: Pool) {}
+
+  /**
+   * Get aggregated notification preferences for a user.
+   * Returns user-level preferences derived from channel-specific settings.
+   * @param user_id User ID
+   * @returns Aggregated preferences or null if no preferences exist
+   */
+  async getByUserId(user_id: string): Promise<NotificationPreferences | null> {
+    const query = `
+      SELECT
+        user_id,
+        COALESCE(MAX(CASE WHEN channel = 'email' THEN enabled END), true)  AS email_notifications,
+        COALESCE(MAX(CASE WHEN channel = 'push'   THEN enabled END), true)  AS push_notifications,
+        COALESCE(MAX(CASE WHEN channel = 'sms'    THEN enabled END), false) AS sms_notifications,
+        MAX(updated_at) AS updated_at
+      FROM notification_preferences
+      WHERE user_id = $1
+      GROUP BY user_id
+    `;
+    const result: QueryResult<NotificationPreferences> = await this.db.query(query, [user_id]);
+    return result.rows[0] || null;
+  }
+
+  /**
+   * Upsert all channel preferences for a user.
+   * Handles partial updates where only some channels are provided.
+   * @param user_id User ID
+   * @param input Channel preference flags
+   * @returns Updated aggregated preferences
+   */
+  async upsert(
+    user_id: string,
+    input: UpdateNotificationPreferencesInput
+  ): Promise<NotificationPreferences> {
+    const channels: Array<'email' | 'push' | 'sms'> = ['email', 'push', 'sms'];
+
+    for (const channel of channels) {
+      const enabled = input[`${channel}_notifications` as keyof UpdateNotificationPreferencesInput];
+      if (enabled !== undefined) {
+        const query = `
+          INSERT INTO notification_preferences (user_id, channel, type, enabled, created_at, updated_at)
+          VALUES ($1, $2, 'default', $3, NOW(), NOW())
+          ON CONFLICT (user_id, channel, type)
+          DO UPDATE SET enabled = $3, updated_at = NOW()
+        `;
+        await this.db.query(query, [user_id, channel, enabled]);
+      }
+    }
+
+    const result = await this.getByUserId(user_id);
+    if (!result) {
+      throw new Error('Failed to upsert notification preferences');
+    }
+    return result;
+  }
 
   /**
    * Get a specific notification preference by user_id, channel, and type
