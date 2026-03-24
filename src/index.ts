@@ -1,5 +1,5 @@
 import "dotenv/config";
-import express, { Request, Response } from "express";
+import express, { Request, Response, NextFunction } from "express";
 import morgan from "morgan";
 import { dbHealth, closePool } from "./db/client";
 import { createCorsMiddleware } from "./middleware/cors";
@@ -12,6 +12,97 @@ import {
   MilestoneValidationEventRepository,
   VerifierAssignmentRepository,
 } from "./vaults/milestoneValidationRoute";
+
+/**
+ * Input Sanitization Middleware
+ * 
+ * Provides comprehensive input sanitization for all incoming request data
+ * to prevent XSS attacks and injection vulnerabilities. This middleware
+ * sanitizes request body, query parameters, and URL parameters.
+ * 
+ * @notice This middleware should be applied before route handlers
+ * @dev Sanitizes string inputs by removing HTML tags and encoding special characters
+ * @param req Express Request object
+ * @param res Express Response object  
+ * @param next Express NextFunction callback
+ */
+const inputSanitizerMiddleware = (req: Request, res: Response, next: NextFunction): void => {
+  /**
+   * Sanitizes a string input by removing potentially dangerous content
+   * 
+   * @param input The string to sanitize
+   * @returns The sanitized string
+   */
+  const sanitizeString = (input: string): string => {
+    if (typeof input !== 'string') {
+      return input;
+    }
+
+    return input
+      // Remove HTML tags
+      .replace(/<[^>]*>/g, '')
+      // Encode special HTML characters
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#x27;')
+      .replace(/\//g, '&#x2F;')
+      // Remove potential JavaScript event handlers
+      .replace(/on\w+\s*=/gi, '')
+      // Remove javascript: protocol
+      .replace(/javascript:/gi, '')
+      // Trim whitespace
+      .trim();
+  };
+
+  /**
+   * Recursively sanitizes an object or array
+   * 
+   * @param obj The object or array to sanitize
+   * @returns The sanitized object or array
+   */
+  const sanitizeRecursive = (obj: any): any => {
+    if (obj === null || obj === undefined) {
+      return obj;
+    }
+
+    if (typeof obj === 'string') {
+      return sanitizeString(obj);
+    }
+
+    if (Array.isArray(obj)) {
+      return obj.map(sanitizeRecursive);
+    }
+
+    if (typeof obj === 'object') {
+      const sanitized: any = {};
+      for (const [key, value] of Object.entries(obj)) {
+        sanitized[key] = sanitizeRecursive(value);
+      }
+      return sanitized;
+    }
+
+    return obj;
+  };
+
+  // Sanitize request body
+  if (req.body) {
+    req.body = sanitizeRecursive(req.body);
+  }
+
+  // Sanitize query parameters
+  if (req.query) {
+    req.query = sanitizeRecursive(req.query);
+  }
+
+  // Sanitize URL parameters
+  if (req.params) {
+    req.params = sanitizeRecursive(req.params);
+  }
+
+  next();
+};
 
 const app = express();
 const port = process.env.PORT ?? 3000;
@@ -138,9 +229,8 @@ const domainEventPublisher = new ConsoleDomainEventPublisher();
 
 app.use(createCorsMiddleware());
 app.use(express.json());
+app.use(inputSanitizerMiddleware);
 app.use(morgan("dev"));
-app.use(
-app.use(morgan('dev'));
 app.use(API_VERSION_PREFIX, apiRouter);
 
 apiRouter.use(
@@ -163,7 +253,6 @@ app.get("/health", async (_req: Request, res: Response) => {
 });
 
 app.get("/api/overview", (_req: Request, res: Response) => {
-apiRouter.get('/overview', (_req: Request, res: Response) => {
   res.json({
     name: "Stellar RevenueShare (Revora) Backend",
     description:
