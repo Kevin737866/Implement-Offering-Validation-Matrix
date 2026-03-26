@@ -353,3 +353,108 @@ describe('Security Regression Suite', () => {
         expect(res.status).not.toBe(401);
     });
 });
+
+describe('JWT Claim Validation tests', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const jwtLib = require('jsonwebtoken');
+    const SECRET = 'test-secret-key-that-is-at-least-32-characters-long!';
+    const PREFIX = process.env.API_VERSION_PREFIX ?? '/api/v1';
+
+    beforeAll(() => { process.env.JWT_SECRET = SECRET; });
+    afterEach(() => { process.env.JWT_SECRET = SECRET; });
+
+    function sign(payload: object, opts: object = {}): string {
+        return jwtLib.sign(payload, SECRET, { algorithm: 'HS256', expiresIn: '1h', ...opts });
+    }
+
+    it('should return 200 and user claims for a valid token', async () => {
+        const token = sign({ sub: 'user-abc', email: 'user@example.com' });
+        const res = await request(app).get(`${PREFIX}/me`).set('Authorization', `Bearer ${token}`);
+        expect(res.status).toBe(200);
+        expect(res.body.user.sub).toBe('user-abc');
+        expect(res.body.user.email).toBe('user@example.com');
+    });
+
+    it('should return 401 when Authorization header is missing', async () => {
+        const res = await request(app).get(`${PREFIX}/me`);
+        expect(res.status).toBe(401);
+        expect(res.body.error).toBe('Unauthorized');
+        expect(res.body.message).toMatch(/Authorization header missing/i);
+    });
+
+    it('should return 401 for non-Bearer authorization scheme', async () => {
+        const res = await request(app).get(`${PREFIX}/me`).set('Authorization', 'Basic dXNlcjpwYXNz');
+        expect(res.status).toBe(401);
+        expect(res.body.error).toBe('Unauthorized');
+        expect(res.body.message).toMatch(/Bearer/i);
+    });
+
+    it('should return 401 with "Token has expired" for an expired token', async () => {
+        const token = sign({ sub: 'user-abc' }, { expiresIn: '-1s' });
+        const res = await request(app).get(`${PREFIX}/me`).set('Authorization', `Bearer ${token}`);
+        expect(res.status).toBe(401);
+        expect(res.body.message).toBe('Token has expired');
+    });
+
+    it('should return 401 when sub claim is missing', async () => {
+        const token = jwtLib.sign({ email: 'no-sub@example.com' }, SECRET, { algorithm: 'HS256' });
+        const res = await request(app).get(`${PREFIX}/me`).set('Authorization', `Bearer ${token}`);
+        expect(res.status).toBe(401);
+        expect(res.body.error).toBe('Unauthorized');
+        expect(res.body.message).toMatch(/subject.*sub/i);
+    });
+
+    it('should return 401 when iat claim is in the future', async () => {
+        // Craft token manually so iat is guaranteed to be in the future.
+        // jsonwebtoken's noTimestamp + manual iat is unreliable across versions.
+        const crypto = require('crypto');
+        const futureIat = Math.floor(Date.now() / 1000) + 7200; // 2h ahead, beyond 30s tolerance
+        const futureExp = futureIat + 3600; // exp also in future so jwt.verify passes
+        const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+        const body = Buffer.from(JSON.stringify({ sub: 'user-abc', iat: futureIat, exp: futureExp })).toString('base64url');
+        const sig = crypto.createHmac('sha256', SECRET).update(`${header}.${body}`).digest('base64url');
+        const token = `${header}.${body}.${sig}`;
+        const res = await request(app).get(`${PREFIX}/me`).set('Authorization', `Bearer ${token}`);
+        expect(res.status).toBe(401);
+        expect(res.body.error).toBe('Unauthorized');
+        expect(res.body.message).toMatch(/iat.*future/i);
+    });
+
+    it('should return 401 when nbf claim is in the future', async () => {
+        const futureNbf = Math.floor(Date.now() / 1000) + 7200;
+        const token = jwtLib.sign(
+            { sub: 'user-abc', nbf: futureNbf },
+            SECRET,
+            { algorithm: 'HS256', expiresIn: '1h' },
+        );
+        const res = await request(app).get(`${PREFIX}/me`).set('Authorization', `Bearer ${token}`);
+        expect(res.status).toBe(401);
+        expect(res.body.error).toBe('Unauthorized');
+        expect(res.body.message).toMatch(/not yet valid|nbf/i);
+    });
+
+    it('should return 401 for a tampered token (invalid signature)', async () => {
+        const token = sign({ sub: 'user-abc' });
+        const parts = token.split('.');
+        const fakePayload = Buffer.from(
+            JSON.stringify({ sub: 'attacker', iat: Math.floor(Date.now() / 1000) })
+        ).toString('base64url');
+        const tampered = `${parts[0]}.${fakePayload}.${parts[2]}`;
+        const res = await request(app).get(`${PREFIX}/me`).set('Authorization', `Bearer ${tampered}`);
+        expect(res.status).toBe(401);
+        expect(res.body.message).toMatch(/signature/i);
+    });
+
+    it('should return 401 for a token with invalid format', async () => {
+        const res = await request(app).get(`${PREFIX}/me`).set('Authorization', 'Bearer not.a.valid.jwt.token');
+        expect(res.status).toBe(401);
+        expect(res.body.error).toBe('Unauthorized');
+    });
+
+    it('should return 500 when JWT_SECRET is not configured', async () => {
+        delete process.env.JWT_SECRET;
+        const res = await request(app).get(`${PREFIX}/me`).set('Authorization', 'Bearer some.dummy.token');
+        expect(res.status).toBe(500);
+        expect(res.body.error).toMatch(/configuration/i);
+    });
+});
