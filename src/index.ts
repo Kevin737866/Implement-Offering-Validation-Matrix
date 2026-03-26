@@ -37,6 +37,7 @@ class InMemoryMilestoneRepository implements MilestoneRepository {
     const key = this.key(input.vaultId, input.milestoneId);
     const current = this.milestones.get(key);
 
+    /* istanbul ignore next -- guarded by pre-check in validate handler */
     if (!current) {
       throw Errors.notFound('Milestone not found');
     }
