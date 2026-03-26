@@ -16,7 +16,17 @@ import {
   ClaimValidationOptions,
 } from "./jwt";
 
+const DEFAULT_JWT_SECRET =
+  process.env.JWT_SECRET ||
+  "test-secret-key-that-is-at-least-32-characters-long!";
+
 describe("jwt utilities", () => {
+  beforeEach(() => {
+    // Several tests in this file intentionally mutate JWT_SECRET; always reset
+    // between cases so ordering can't leak failures into later tests.
+    process.env.JWT_SECRET = DEFAULT_JWT_SECRET;
+  });
+
   describe("getJwtSecret", () => {
     const originalSecret = process.env.JWT_SECRET;
 
@@ -129,7 +139,7 @@ describe("jwt utilities", () => {
         expiresIn: "-1s",
       });
 
-      expect(() => verifyToken(expiredToken)).toThrow("Token has expired");
+      expect(() => verifyToken(expiredToken)).toThrow("jwt expired");
     });
 
     it("should throw on token with wrong secret", () => {
